@@ -1,0 +1,101 @@
+module uart_rx(
+    input wire clk,
+    input wire rst_n,  // Active low reset
+    input wire rx_enb,  // 16X Baud Rate Enable from BRG (controls sampling)
+    input wire rx,      // Serial input line (RXD)
+    output reg [7:0] data_out, // Received parallel data
+    output reg rx_dv      // Data Valid (pulse high when data_out is ready)
+);
+
+    // FSM States
+    localparam IDLE_STATE      = 3'b000; // Waiting for start bit
+    localparam START_STATE     = 3'b001; // Sampling start bit
+    localparam DATA_STATE      = 3'b010; // Sampling 8 data bits
+    localparam STOP_STATE      = 3'b011; // Sampling stop bit
+    localparam CLEANUP_STATE   = 3'b100; // Assert rx_dv and clean up
+
+    // Signals
+    reg [7:0] data_shift_reg;    // Accumulates the received data bits
+    reg [3:0] bit_index;         // Counts data bits 0 to 7
+    reg [3:0] rx_sample_count;   // Counts 16X samples (0 to 15)
+    reg [2:0] current_state;     // FSM state register
+
+    // ----------------- State Transition Logic -----------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            current_state   <= IDLE_STATE;
+            rx_dv           <= 1'b0;
+            rx_sample_count <= 4'd0;
+            bit_index       <= 4'd0;
+        end else begin
+            rx_dv <= 1'b0; // Default to low
+
+            case (current_state)
+                IDLE_STATE: begin
+                    if (rx == 1'b0) begin   // Detect start bit (line goes low)
+                        current_state <= START_STATE;
+                        rx_sample_count <= 4'd1; // Start counting from 1 (Wait 1.5 periods)
+                    end else begin
+                        current_state <= IDLE_STATE;
+                    end
+                end
+
+                START_STATE: begin
+                    if (rx_enb) begin
+                        if (rx_sample_count == 4'd8) begin // Sample start bit center (8/16th)
+                            if (rx == 1'b0) begin         // Start bit is confirmed low
+                                current_state <= DATA_STATE;
+                                rx_sample_count <= 4'd0; // Reset counter for next bit
+                                bit_index <= 4'd0;
+                            end else begin
+                                current_state <= IDLE_STATE; // False start bit detection
+                            end
+                        end else begin
+                            rx_sample_count <= rx_sample_count + 1'b1;
+                        end
+                    end
+                end
+                
+                DATA_STATE: begin
+                    if (rx_enb) begin
+                        if (rx_sample_count == 4'd15) begin // Sample data bit center (15/16th)
+                            rx_sample_count <= 4'd0;
+                            
+                            // Sample and store the data bit (LSB first)
+                            data_shift_reg[bit_index] <= rx; 
+                            
+                            if (bit_index == 4'd7) begin // All 8 bits received
+                                current_state <= STOP_STATE;
+                            end else begin
+                                bit_index <= bit_index + 1'b1;
+                            end
+                        end else begin
+                            rx_sample_count <= rx_sample_count + 1'b1;
+                        end
+                    end
+                end
+
+                STOP_STATE: begin
+                    if (rx_enb) begin
+                        if (rx_sample_count == 4'd15) begin // Sample stop bit center
+                            rx_sample_count <= 4'd0;
+                            // Optional: Check if (rx == 1'b1) for framing error
+                            
+                            data_out <= data_shift_reg; // Output the data
+                            current_state <= CLEANUP_STATE; // Move to cleanup
+                        end else begin
+                            rx_sample_count <= rx_sample_count + 1'b1;
+                        end
+                    end
+                end
+
+                CLEANUP_STATE: begin
+                    rx_dv <= 1'b1; // Assert Data Valid
+                    current_state <= IDLE_STATE; // Return to idle
+                end
+
+                default: current_state <= IDLE_STATE;
+            endcase
+        end
+    end
+endmodule
